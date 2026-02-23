@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Exam Proctor Test</title>
+    <style>
+        body { font-family: Arial; text-align: center; background:#f5f5f5; }
+        video { border:2px solid black; margin-top:20px; }
+        #alerts { margin-top:20px; font-size:20px; font-weight:bold; color:red; }
+        #status { margin-top:10px; font-size:14px; color:green; }
+        #fps { margin-top:5px; font-size:13px; color:#333; }
+    </style>
+</head>
+<body>
+
+<h2>Local Exam Proctoring Test (Video + Secure Audio)</h2>
+
+<video id="video" width="640" height="480" autoplay muted></video>
+<canvas id="canvas" style="display:none;"></canvas>
+
+<div id="alerts"></div>
+<div id="status">Connecting...</div>
+<div id="fps"></div>
+
+<script>
+const VIDEO_URL = "http://localhost:8000/process-frame";
+const AUDIO_URL = "http://localhost:8000/process-audio";
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const alertsDiv = document.getElementById("alerts");
+const statusDiv = document.getElementById("status");
+const fpsDiv = document.getElementById("fps");
+
+let sending = false;
+let frameCount = 0;
+let lastFpsTime = performance.now();
+let audioStatus = "";
+
+// ---------------- VIDEO ----------------
+navigator.mediaDevices.getUserMedia({
+    video:{ width:640, height:480, facingMode:"user" }
+}).then(stream=>{
+    video.srcObject = stream;
+    statusDiv.innerText = "Camera connected.";
+}).catch(e=>alert(e));
+
+function sendFrame(){
+    if(!video.videoWidth || sending) return;
+    sending = true;
+
+    const ctx = canvas.getContext("2d");
+    canvas.width = 640;
+    canvas.height = 480;
+    ctx.drawImage(video,0,0,640,480);
+
+    canvas.toBlob(blob=>{
+        if(!blob){ sending=false; return; }
+
+        const fd = new FormData();
+        fd.append("file",blob,"frame.jpg");
+
+        fetch(VIDEO_URL,{method:"POST",body:fd})
+        .then(r=>r.json())
+        .then(data=>{
+
+            frameCount++;
+            const now = performance.now();
+            if(now-lastFpsTime>=1000){
+                fpsDiv.innerText = "FPS: "+frameCount;
+                frameCount=0;
+                lastFpsTime=now;
+            }
+
+            let flags=[];
+            if(data.anomalies){
+                data.anomalies.forEach(a=>{
+                    if(a.reason==="no_face_detected") flags.push("NO FACE");
+                    if(a.imposter_detected) flags.push("IMPOSTER");
+                    if(a.multiple_faces) flags.push("MULTIPLE");
+                    if(a.looking_away) flags.push("LOOKING AWAY");
+                });
+            }
+
+            let combined = flags.join(" | ");
+            if(audioStatus) combined += " | "+audioStatus;
+
+            alertsDiv.innerText = combined;
+            statusDiv.innerText = combined ? "Anomaly detected" : "All good";
+
+            sending=false;
+        })
+        .catch(()=>{
+            alertsDiv.innerText="SERVER ERROR";
+            sending=false;
+        });
+
+    },"image/jpeg",0.6);
+}
+setInterval(sendFrame,300);
+
+// ---------------- 🔥 SECURE PCM AUDIO ----------------
+navigator.mediaDevices.getUserMedia({audio:true}).then(stream=>{
+
+    const ctx = new AudioContext();
+    const src = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(1024,1,1);
+
+    src.connect(processor);
+    processor.connect(ctx.destination);
+
+    let buffer=[];
+
+    processor.onaudioprocess = e=>{
+        const input = e.inputBuffer.getChannelData(0);
+        buffer.push(new Float32Array(input));
+
+        if(buffer.length>15){
+            let merged = new Float32Array(buffer.length*input.length);
+            let offset=0;
+
+            buffer.forEach(b=>{
+                merged.set(b,offset);
+                offset+=b.length;
+            });
+            buffer=[];
+
+            fetch(AUDIO_URL,{
+                method:"POST",
+                body:merged
+            })
+            .then(r=>r.json())
+            .then(d=>{
+                if(d.noise) audioStatus="NOISE";
+                else audioStatus="";
+            })
+            .catch(()=>audioStatus="AUDIO ERR");
+        }
+    };
+
+}).catch(()=>audioStatus="MIC BLOCKED");
+
+</script>
+</body>
+</html>

@@ -1,44 +1,75 @@
 import cv2
 
+
 class GazeDetector:
-    def __init__(self, threshold=0.35, debug=False):
+    def __init__(self, h_dev=0.15, v_down=0.17, v_up=0.25, debug=False):
         """
-        threshold: fraction of FRAME width/height considered as central focus zone.
-        (0.35 → roughly central 30% area is valid)
-        debug: if True, draws the central focus zone for visualization.
+        h_dev:
+            horizontal deviation threshold
+
+        v_down:
+            downward deviation (more sensitive)
+
+        v_up:
+            upward deviation (less sensitive)
         """
-        self.threshold = threshold
+        self.h_dev = h_dev
+        self.v_down = v_down
+        self.v_up = v_up
         self.debug = debug
 
-    def is_looking_away(self, left_center, right_center, frame_width, frame_height, frame=None):
-        """
-        Returns True if both eyes are outside the central viewing zone.
-        Optionally draws the zone if `debug=True` and frame is provided.
-        """
-        # Handle invalid or missing eye landmarks
-        if not left_center or not right_center or frame_width == 0 or frame_height == 0:
-            return True  # Consider as looking away
+        self.center_x = None
+        self.center_y = None
 
-        # Normalize positions to [0, 1]
-        left_x, left_y = left_center[0] / frame_width, left_center[1] / frame_height
-        right_x, right_y = right_center[0] / frame_width, right_center[1] / frame_height
+    def is_looking_away(
+        self,
+        left_center,
+        right_center,
+        frame_width,
+        frame_height,
+        frame=None
+    ):
+        if (
+            left_center is None
+            or right_center is None
+            or frame_width <= 0
+            or frame_height <= 0
+        ):
+            return False, {}
 
-        # Define central focus zone
-        x_min, x_max = self.threshold, 1 - self.threshold
-        y_min, y_max = self.threshold, 1 - self.threshold
+        # midpoint
+        mid_x = (left_center[0] + right_center[0]) / 2.0
+        mid_y = (left_center[1] + right_center[1]) / 2.0
 
-        # Check if both eyes are outside the zone
-        left_out = not (x_min <= left_x <= x_max and y_min <= left_y <= y_max)
-        right_out = not (x_min <= right_x <= x_max and y_min <= right_y <= y_max)
+        nx = mid_x / frame_width
+        ny = mid_y / frame_height
 
-        # Optional visualization for debugging
+        # calibration
+        if self.center_x is None:
+            self.center_x = nx
+            self.center_y = ny
+
+        dx = abs(nx - self.center_x)
+        dy = ny - self.center_y
+
+        horizontal_out = dx > self.h_dev
+        down_out = dy > self.v_down
+        up_out = dy < -self.v_up
+
+        looking_away = horizontal_out or down_out or up_out
+
         if self.debug and frame is not None:
-            self._draw_focus_zone(frame, x_min, x_max, y_min, y_max, frame_width, frame_height)
+            cv2.circle(frame, (int(mid_x), int(mid_y)), 4, (255, 0, 0), -1)
+            text = f"dx={dx:.2f} dy={dy:.2f}"
+            cv2.putText(frame, text, (10, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        return left_out and right_out
+        debug = {
+            "dx": round(dx, 3),
+            "dy": round(dy, 3),
+            "h_out": horizontal_out,
+            "down_out": down_out,
+            "up_out": up_out
+        }
 
-    def _draw_focus_zone(self, frame, x_min, x_max, y_min, y_max, w, h):
-        """Draw the central focus zone as a rectangle overlay (for debugging)."""
-        start_point = (int(x_min * w), int(y_min * h))
-        end_point = (int(x_max * w), int(y_max * h))
-        cv2.rectangle(frame, start_point, end_point, (0, 255, 255), 2)
+        return looking_away, debug

@@ -5,28 +5,46 @@ from dotenv import load_dotenv
 
 
 class PostgresLogger:
-    def __init__(self, db_config=None):
+    def __init__(self):
         load_dotenv()
+        self.database_url = os.getenv("DATABASE_URL")
 
-        DATABASE_URL = os.getenv("DATABASE_URL")
-        if not DATABASE_URL:
+        if not self.database_url:
             raise EnvironmentError("DATABASE_URL not found.")
 
+        self._connect()
+
+    # ---------------- CONNECT ----------------
+    def _connect(self):
         try:
             self.conn = psycopg2.connect(
-                DATABASE_URL,
-                sslmode="require"
+                self.database_url,
+                sslmode="require",
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5
             )
             self.cur = self.conn.cursor()
             self._ensure_tables()
-            print("✅ Postgres connected successfully.")
+            print("✅ Postgres connected")
+
         except Exception as e:
-            print("❌ Postgres connection failed:", e)
+            print("❌ DB connect failed:", e)
             raise
 
+    def _safe_execute(self, query, params):
+        try:
+            self.cur.execute(query, params)
+            self.conn.commit()
+        except Exception:
+            print("⚠️ DB reconnecting...")
+            self._connect()
+            self.cur.execute(query, params)
+            self.conn.commit()
+
+    # ---------------- TABLES ----------------
     def _ensure_tables(self):
-        """Create tables if they don't exist."""
-        # Face/video anomalies
         self.cur.execute("""
             CREATE TABLE IF NOT EXISTS anomalies (
                 id SERIAL PRIMARY KEY,
@@ -40,61 +58,75 @@ class PostgresLogger:
                 looking_away BOOLEAN,
                 multiple_faces BOOLEAN,
                 imposter_detected BOOLEAN,
-                frame_url TEXT                     -- ✅ NEW: store Cloudinary URL
+                frame_url TEXT
             );
         """)
-        # Simplified audio anomalies table
+
         self.cur.execute("""
             CREATE TABLE IF NOT EXISTS audio_anomalies (
                 id SERIAL PRIMARY KEY,
                 session_id TEXT,
                 timestamp TIMESTAMP,
-                source TEXT,
-                multiple_speakers BOOLEAN,
-                noise_detected BOOLEAN
+                noise_detected BOOLEAN,
+                energy FLOAT
             );
         """)
+
         self.conn.commit()
 
-    # ----------------- FACE/VIDEO LOGGING -----------------
-    def log_anomaly(self, frame_id, name, expected_user,
-                    face_visible, eyes_visible, looking_away,
-                    multiple_faces, imposter_detected,
-                    session_id=None, frame_url=None):
-        """
-        Logs a single video anomaly event with optional Cloudinary frame URL.
-        """
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.cur.execute("""
+    # ---------------- VIDEO ----------------
+    def log_anomaly(
+        self,
+        frame_id,
+        name,
+        expected_user,
+        face_visible,
+        eyes_visible,
+        looking_away,
+        multiple_faces,
+        imposter_detected,
+        session_id,
+        frame_url=None
+    ):
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        self._safe_execute("""
             INSERT INTO anomalies (
-                session_id, frame_id, timestamp, recognized_name, expected_user,
-                face_visible, eyes_visible, looking_away, multiple_faces, imposter_detected, frame_url
+                session_id, frame_id, timestamp,
+                recognized_name, expected_user,
+                face_visible, eyes_visible, looking_away,
+                multiple_faces, imposter_detected, frame_url
             )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (
-            session_id, frame_id, timestamp, name, expected_user,
-            face_visible, eyes_visible, looking_away,
-            multiple_faces, imposter_detected, frame_url
+            session_id,
+            frame_id,
+            ts,
+            name,
+            expected_user,
+            face_visible,
+            eyes_visible,
+            looking_away,
+            multiple_faces,
+            imposter_detected,
+            frame_url
         ))
-        self.conn.commit()
 
-    # ----------------- AUDIO LOGGING -----------------
-    def log_audio_anomalies(self, session_id, source, multiple_speakers, noise_detected):
-        """
-        Log minimal audio anomalies (no segment tracking).
-        """
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.cur.execute("""
+    # ---------------- AUDIO ----------------
+    def log_audio(self, session_id, noise, energy):
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        self._safe_execute("""
             INSERT INTO audio_anomalies (
-                session_id, timestamp, source, multiple_speakers, noise_detected
+                session_id, timestamp, noise_detected, energy
             )
-            VALUES (%s,%s,%s,%s,%s)
-        """, (
-            session_id, timestamp, source, multiple_speakers, noise_detected
-        ))
-        self.conn.commit()
+            VALUES (%s,%s,%s,%s)
+        """, (session_id, ts, noise, energy))
 
-    # ----------------- CLEANUP -----------------
+    # ---------------- CLEANUP ----------------
     def close(self):
-        self.cur.close()
-        self.conn.close()
+        try:
+            self.cur.close()
+            self.conn.close()
+        except:
+            pass

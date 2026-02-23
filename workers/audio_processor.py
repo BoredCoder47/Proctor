@@ -1,49 +1,34 @@
-# workers/audio_processor.py
-from utils.audio_utils import safe_record_audio
-from detectors.audio_detector import AudioDetector
-from utils.postgres_logger import PostgresLogger
-from utils.session_utils import generate_session_id
+import numpy as np
+import time
+
 
 class AudioProcessor:
-    def __init__(self, db_config, session_id=None, sr=16000):
-        self.session_id = session_id or generate_session_id(prefix="audio")
-        self.sr = sr
-        self.detector = AudioDetector(sr=self.sr)
-        self.logger = PostgresLogger(db_config)
+    """
+    Ultra-light backend noise detector.
 
-    # -----------------------------
-    # Process live microphone input
-    # -----------------------------
-    def process_mic(self, duration_sec=3):
-        audio = safe_record_audio(duration_sec=duration_sec, samplerate=self.sr)
+    Works with raw float32 PCM from browser.
+    Stable, fast, and secure.
+    """
+
+    def __init__(self):
+        self.noise_threshold = 0.03   # tune if mic quiet
+        self.cooldown = 2.0
+        self.last_noise_time = 0
+
+    def process_pcm(self, audio: np.ndarray):
         if audio is None or len(audio) == 0:
-            print("[AudioProcessor] No audio captured.")
-            return {"multiple_speakers": False, "noise_detected": False}
+            return {"noise": False}
 
-        if audio.ndim > 1:
-            audio = audio.flatten()
+        # RMS energy
+        energy = float(np.sqrt(np.mean(audio ** 2)))
+        now = time.time()
 
-        # Detect anomalies (minimal)
-        report = self.detector.detect(audio)
-        multiple_speakers = report.get("multiple_speakers", False)
-        noise_detected = bool(len(audio) > 0 and not report.get("multiple_speakers", False))  # simple noise flag
+        noise = False
+        if energy > self.noise_threshold and (now - self.last_noise_time) > self.cooldown:
+            noise = True
+            self.last_noise_time = now
 
-        # Log minimal info
-        try:
-            self.logger.log_audio_anomalies(
-                segments=None,  # not tracking segments
-                session_id=self.session_id,
-                source="microphone",
-                multiple_speakers=multiple_speakers,
-                noise_detected=noise_detected
-            )
-        except Exception as e:
-            print(f"[AudioProcessor] Logging error: {e}")
-
-        return {"multiple_speakers": multiple_speakers, "noise_detected": noise_detected}
-
-    # -----------------------------
-    # Cleanup
-    # -----------------------------
-    def close(self):
-        self.logger.close()
+        return {
+            "noise": noise,
+            "energy": round(energy, 4)
+        }
